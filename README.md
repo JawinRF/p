@@ -150,5 +150,4 @@ For a typical **mobile AI agent**, you would:
 - Run **PRISM Shield** on all context entering from the Android OS (clipboard, intents, accessibility dumps) **before** committing it to the agent’s memory.
 - Use **MemShield** on top of the agent’s vector store so that any poisoned entries that did slip through are filtered at retrieval time, with auditable traces.
 
-This repo, plus your written report, gives you a complete, end-to-end project implementation for **preventing poisoning context to mobile agents**.
 
