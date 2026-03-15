@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- res/layout/activity_main.xml  (poison-app) -->
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp"
+    android:gravity="center_horizontal">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="PRISM Poison Notification Tester"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:gravity="center"
+        android:paddingBottom="8dp"/>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Fires real Android notifications. PRISM should block attack payloads."
+        android:textSize="13sp"
+        android:gravity="center"
+        android:paddingBottom="24dp"
+        android:alpha="0.6"/>
+
+    <!-- Status display -->
+    <TextView
+        android:id="@+id/tv_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#11000000"
+        android:padding="16dp"
+        android:textSize="13sp"
+        android:textStyle="italic"
+        android:layout_marginBottom="24dp"/>
+
+    <!-- Send attack notification -->
+    <Button
+        android:id="@+id/btn_send_attack"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="☠️ Fire Attack Notification"
+        android:backgroundTint="#C0392B"
+        android:textColor="#FFFFFF"
+        android:layout_marginBottom="12dp"/>
+
+    <!-- Send benign notification -->
+    <Button
+        android:id="@+id/btn_send_benign"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="✅ Fire Benign Notification"
+        android:backgroundTint="#27AE60"
+        android:textColor="#FFFFFF"
+        android:layout_marginBottom="12dp"/>
+
+    <!-- Cycle through payloads -->
+    <Button
+        android:id="@+id/btn_cycle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="🔄 Cycle to Next Payload"
+        android:layout_marginBottom="24dp"/>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Watch the PRISM audit log:\ntail -f data/audit_log.jsonl | jq ."
+        android:textSize="12sp"
+        android:gravity="center"
+        android:alpha="0.5"
+        android:fontFamily="monospace"/>
+
+</LinearLayout>

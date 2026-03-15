@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+set -eu
+
+POISON_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+APP_DIR="$POISON_DIR/../app"
+GRADLE_VERSION=8.7
+DIST_DIR="$APP_DIR/.gradle-dist"
+GRADLE_HOME="$DIST_DIR/gradle-$GRADLE_VERSION"
+
+export ANDROID_HOME="${ANDROID_HOME:-/home/jrf/Android}"
+export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+
+exec "$GRADLE_HOME/bin/gradle" -p "$POISON_DIR" "$@"
