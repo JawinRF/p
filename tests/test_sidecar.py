@@ -101,7 +101,7 @@ def _inspect(entry_id: str, text: str) -> dict:
             "run_id": "test-run",
             "metadata": {},
         },
-        timeout=5,
+        timeout=60,  # first request can load Layer 3 DeBERTa
     )
     response.raise_for_status()
     return response.json()

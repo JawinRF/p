@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import logging
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import asdict
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("prism.sidecar")
 
 try:
     from fastapi import Depends, FastAPI, HTTPException, Request
@@ -47,6 +54,7 @@ DEFAULT_HOST = os.getenv("PRISM_SIDECAR_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("PRISM_SIDECAR_PORT", "8765"))
 ENABLE_MEMSHIELD_RAG = os.getenv("PRISM_ENABLE_MEMSHIELD_RAG", "1").lower() not in {"0", "false", "no"}
 UI_EXTRACTOR = UIExtractor()
+_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 
 
 def _model_dump(model: object) -> dict:
@@ -153,7 +161,26 @@ def handle_inspect(request: InspectRequest) -> InspectResponse:
             metadata=dict(request.metadata),
         )
         pipeline = get_pipeline()
-        result = pipeline.evaluate_sync(entry)
+        
+        # Debug logging and timeout wrapper
+        logger.info(f"evaluate_sync start: path={request.ingestion_path} text_len={len(request.text)}")
+        try:
+            future = _EXECUTOR.submit(pipeline.evaluate_sync, entry)
+            result = future.result(timeout=15)
+            logger.info(f"evaluate_sync complete: verdict={result.verdict}")
+        except FuturesTimeoutError:
+            logger.warning("evaluate_sync timeout (15s exceeded)")
+            audit = _build_audit(request, ingestion_path)
+            return InspectResponse(
+                verdict="BLOCK",
+                confidence=0.99,
+                reason="pipeline_timeout",
+                layer_triggered="timeout",
+                normalized_text=request.text[:100],
+                ticket_id=None,
+                placeholder="[PRISM_BLOCKED pipeline timeout]",
+                audit=audit,
+            )
 
         placeholder = None
         ticket_id = result.ticket_id
