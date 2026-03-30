@@ -1,7 +1,8 @@
 """
-context_assembler.py — Gathers context from all 7 Android ingestion paths,
+context_assembler.py — Gathers context from 6 Android ingestion paths,
 filters each through the PRISM Shield sidecar, and returns a clean
 AssembledContext that the agent LLM can safely consume.
+(Network response monitoring is planned but not yet implemented.)
 
 This is the core defense: PRISM sits BETWEEN the Android sources and the LLM.
 """
@@ -26,7 +27,6 @@ class AssembledContext:
     notifications: list[dict] = field(default_factory=list)
     clipboard: str | None = None
     intent_data: list[dict] = field(default_factory=list)
-    network_data: list[dict] = field(default_factory=list)
     storage_data: list[dict] = field(default_factory=list)
     rag_context: list[str] = field(default_factory=list)
     blocked_counts: dict[str, int] = field(default_factory=dict)
@@ -70,7 +70,7 @@ class Notification:
 
 class ContextAssembler:
     """
-    Gathers context from all 7 Android ingestion paths, filters each
+    Gathers context from 6 Android ingestion paths, filters each
     through the PRISM Shield sidecar, and returns only clean data.
     """
 
@@ -124,15 +124,11 @@ class ContextAssembler:
         ctx.intent_data, intent_blocked = self._gather_intents()
         ctx.blocked_counts["android_intents"] = intent_blocked
 
-        # 5. Network Responses (placeholder for demo)
-        ctx.network_data, net_blocked = self._gather_network()
-        ctx.blocked_counts["network_responses"] = net_blocked
-
-        # 6. Shared Storage
+        # 5. Shared Storage
         ctx.storage_data, stor_blocked = self._gather_storage()
         ctx.blocked_counts["shared_storage"] = stor_blocked
 
-        # 7. RAG Store
+        # 6. RAG Store
         ctx.rag_context, rag_blocked = self._gather_rag(rag_query or task, recent_actions)
         ctx.blocked_counts["rag_store"] = rag_blocked
 
@@ -422,15 +418,15 @@ class ContextAssembler:
 
         return allowed, blocked
 
-    # ── 5. Network Responses ─────────────────────────────────────────────────
+    # ── Network Responses (NOT IMPLEMENTED) ────────────────────────────────
+    # Would require a proxy or VPN-based traffic interceptor on the device.
+    # Not called from assemble() — kept as interface placeholder.
 
     def _gather_network(self) -> tuple[list[dict], int]:
-        """Placeholder for network response monitoring."""
-        # In a production system, this would intercept HTTP responses
-        # via a proxy or VPN-based traffic inspector.
+        """Not implemented — no proxy/VPN interceptor available."""
         return [], 0
 
-    # ── 6. Shared Storage ────────────────────────────────────────────────────
+    # ── 5. Shared Storage ────────────────────────────────────────────────────
 
     def _gather_storage(self) -> tuple[list[dict], int]:
         """Read watched files from device storage, filter through PRISM."""

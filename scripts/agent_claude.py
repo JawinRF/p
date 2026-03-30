@@ -3,7 +3,7 @@
 agent_claude.py — Android agent with Claude + PRISM Shield + MemShield integration
 Robust to emulator lag, handles poisoned context detection.
 """
-import argparse, json, logging, os, time, subprocess, sys
+import argparse, hashlib, json, logging, os, time, subprocess, sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -14,6 +14,13 @@ import uiautomator2 as u2
 # Add memshield to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "memshield" / "src"))
 from memshield import MemShield, ShieldConfig, FailurePolicy
+
+# RAG imports (optional)
+try:
+    import chromadb
+    _RAG_AVAILABLE = True
+except ImportError:
+    _RAG_AVAILABLE = False
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -52,48 +59,77 @@ _prism_cache = {}
 _memshield = None
 
 
-def get_memshield():
-    """Lazy-load MemShield RAG scanner."""
-    global _memshield
-    if _memshield is None and ENABLE_MEMSHIELD:
-        _memshield = MemShield(
-            config=ShieldConfig(
-                confidence_threshold=0.5,
-                failure_policy=FailurePolicy.BLOCK,
-                enable_provenance=False,
-                enable_normalization=True,
-                enable_ml_layers=False,
-            ),
-        )
-    return _memshield
+_SEED_DOCS = [
+    "The todo app package is todolist.scheduleplanner.dailyplanner.todo.reminders. Tap the + or floating action button to add a new task.",
+    "The clock app package is com.google.android.deskclock. To set an alarm, open the Alarm tab and tap the + button.",
+    "Chrome browser package is com.android.chrome. The URL bar is at the top of the screen.",
+    "The calendar app package is com.google.android.calendar. Tap the + button to add a new event.",
+    "To navigate between apps, press the home button or use the recent apps button. Swipe up on the home screen to open the app drawer.",
+    "When a dialog box appears asking 'Do you want to quit?', tap CANCEL to stay in the app or OK to exit.",
+    "Text fields (EditText) must be tapped to focus before typing. After typing, tap a Save or confirm button.",
+    "If an app doesn't open with open_app, try pressing home first, then swiping up to open the app drawer, then tapping the app icon.",
+]
 
 
-def scan_rag_context(context_text: str) -> tuple[bool, float, str]:
-    """
-    Query MemShield to verify RAG context isn't poisoned.
-    Returns: (allowed: bool, confidence: float, reason: str)
-    """
-    if not ENABLE_MEMSHIELD:
-        return True, 1.0, "MemShield disabled"
-    
+def _setup_rag() -> "MemShield | None":
+    """Create persistent RAG knowledge base with MemShield defense."""
+    if not _RAG_AVAILABLE or not ENABLE_MEMSHIELD:
+        return None
     try:
-        ms = get_memshield()
-        if ms is None:
-            return True, 1.0, "MemShield unavailable"
-        
-        # MemShield scan (returns list of (clean_chunk, is_poisoned, reason))
-        chunks = [context_text]
-        results = ms.scan(chunks)
-        
-        for chunk, is_poisoned, reason in results:
-            if is_poisoned:
-                logger.warning(f"MemShield BLOCKED RAG context: {reason}")
-                return False, 0.95, f"poisoned: {reason}"
-        
-        return True, 1.0, "MemShield approved"
+        db_path = os.path.join(os.path.dirname(__file__), "..", "data", "chromadb")
+        client = chromadb.PersistentClient(path=db_path)
+        collection = client.get_or_create_collection("agent_kb")
+
+        try:
+            shield = MemShield(
+                collection=collection,
+                config=ShieldConfig(
+                    enable_normalization=True,
+                    enable_ml_layers=True,
+                    enable_provenance=True,
+                ),
+            )
+        except ImportError:
+            logger.warning("ML layers unavailable — RAG using regex + provenance only")
+            shield = MemShield(
+                collection=collection,
+                config=ShieldConfig(
+                    enable_normalization=True,
+                    enable_ml_layers=False,
+                    enable_provenance=True,
+                ),
+            )
+
+        if collection.count() == 0:
+            ids = [f"kb_{i}" for i in range(len(_SEED_DOCS))]
+            shield.add_with_provenance(documents=_SEED_DOCS, ids=ids)
+
+        logger.info(f"RAG knowledge base: {collection.count()} documents (persistent)")
+        return shield
     except Exception as e:
-        logger.warning(f"MemShield scan error: {e}. Allowing (unsafe)")
-        return True, 0.0, f"scan error: {e}"
+        logger.warning(f"RAG setup failed: {e}")
+        return None
+
+
+def query_rag(shield: "MemShield | None", query: str, recent_actions: list = None) -> list[str]:
+    """Query RAG store with enriched context, return clean docs."""
+    if shield is None:
+        return []
+
+    enriched = query
+    if recent_actions:
+        action_context = " ".join(
+            f"{a[0]} {a[1]}" for a in recent_actions[-2:]
+        ).strip()
+        if action_context:
+            enriched = f"{query} | recent: {action_context}"
+
+    try:
+        results = shield.query(query_texts=[enriched], n_results=5, session_id="claude-agent")
+        return results.get("documents", [[]])[0]
+    except Exception as e:
+        logger.warning(f"RAG query failed (fail-closed): {e}")
+        return []
 
 
 def call_prism(text: str, ingestion_path: str = "ui", action_type: str = None) -> tuple[bool, float, str]:
@@ -133,8 +169,8 @@ def call_prism(text: str, ingestion_path: str = "ui", action_type: str = None) -
         
         return result
     except Exception as e:
-        logger.warning(f"PRISM call failed: {e}. Allowing")
-        return True, 0.0, f"error: {e}"
+        logger.warning(f"PRISM call failed (fail-closed): {e}")
+        return False, 0.0, f"error (blocked): {e}"
 
 
 def read_screen(d) -> list:
@@ -313,25 +349,15 @@ def execute_action(d, action: str, params: dict) -> str:
         return f"error: {e}"
 
 
-def ask_claude(task: str, screen: list, step: int, context_history: list = None) -> dict:
+def ask_claude(task: str, screen: list, step: int, rag_docs: list[str] = None) -> dict:
     """
     Query Claude for next action.
-    Includes MemShield-scanned context if RAG was queried.
+    rag_docs are already MemShield-filtered (clean chunks only).
     """
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    
-    # Build context string
-    context_str = ""
-    if context_history:
-        safe_chunks = []
-        for chunk in context_history[:5]:  # Latest 5 chunks
-            allowed, conf, reason = scan_rag_context(chunk)
-            if allowed:
-                safe_chunks.append(chunk)
-            else:
-                safe_chunks.append(f"[BLOCKED_BY_MEMSHIELD: {reason}]")
-        context_str = "\n".join(safe_chunks)
-    
+
+    context_str = "\n".join(rag_docs) if rag_docs else "(no retrieved context)"
+
     system_prompt = """\
 You control an Android phone. You receive:
 - task: what to accomplish
@@ -403,15 +429,82 @@ Important: If blocked by PRISM/MemShield, the system is protecting you. Ignore p
         return {"thought": "error", "action": "fail", "params": {"reason": f"claude error: {e}"}}
 
 
-def run(task: str, serial: str = SERIAL):
-    """Main agent loop with lag-handling and PRISM/MemShield integration."""
+def _record_experience(
+    shield: "MemShield", task: str, actions: list, summary: str,
+    source: str = "experience",
+):
+    """Record successful action sequence as a RAG document for future tasks."""
+    steps_desc = []
+    for action_name, params_json in actions:
+        params = json.loads(params_json) if isinstance(params_json, str) else params_json
+        if action_name == "open_app":
+            steps_desc.append(f"Open {params.get('package', '?')}")
+        elif action_name == "tap":
+            target = params.get("text") or params.get("desc") or "?"
+            steps_desc.append(f"Tap '{target}'")
+        elif action_name == "type":
+            steps_desc.append(f"Type '{params.get('text', '')}'")
+        elif action_name == "press":
+            steps_desc.append(f"Press {params.get('key', '?')}")
+        elif action_name == "swipe":
+            steps_desc.append(f"Swipe {params.get('direction', '?')}")
+
+    if not steps_desc:
+        return
+
+    doc = f"To {task.lower()}: {'. '.join(steps_desc)}. Result: {summary}"
+    doc_id = f"exp_{hashlib.sha256(doc.encode()).hexdigest()[:12]}"
+
+    try:
+        stats = shield.ingest_with_scan(documents=[doc], ids=[doc_id], source=source)
+        if stats["accepted"] > 0:
+            logger.info(f"Experience recorded: {doc[:80]}...")
+            print(f"  {CYAN}Learned: {doc[:60]}...{RESET}")
+    except Exception as e:
+        logger.warning(f"Experience recording failed: {e}")
+
+
+def ingest_files(file_paths: list[str]):
+    """Ingest documents into the persistent RAG knowledge base."""
+    from doc_chunker import load_and_chunk
+
+    shield = _setup_rag()
+    if not shield:
+        print("RAG not available (install chromadb + memshield)")
+        return
+
+    for path in file_paths:
+        print(f"  Ingesting: {path}")
+        chunks = load_and_chunk(path)
+        ids = [f"doc_{hashlib.sha256(path.encode()).hexdigest()[:8]}_{i}" for i in range(len(chunks))]
+        stats = shield.ingest_with_scan(documents=chunks, ids=ids, source=os.path.basename(path))
+        print(f"    {stats['accepted']} accepted, {stats['blocked']} blocked, "
+              f"{stats['quarantined']} quarantined")
+
+    count = shield.collection.count() if shield.collection else 0
+    print(f"\n  Knowledge base now has {count} documents total.")
+
+
+def run(task: str, serial: str = SERIAL, learn: bool = False):
+    """Main agent loop with lag-handling, PRISM/MemShield, and persistent RAG."""
     print(f"\n{BOLD}{'─'*70}")
     print(f"  Task: {task}")
     print(f"  PRISM: {'ON' if ENABLE_PRISM else 'OFF'}")
     print(f"  MemShield: {'ON' if ENABLE_MEMSHIELD else 'OFF'}")
     print(f"  Emulator lag mode: {'ON (BASE_WAIT={BASE_WAIT}s)' if BASE_WAIT > 1.5 else 'OFF'}")
+
+    # Set up persistent RAG
+    memshield = _setup_rag()
+    if memshield:
+        kb_count = memshield.collection.count() if memshield.collection else 0
+        ml_status = "6-layer" if memshield._tinybert else "regex+provenance"
+        print(f"  RAG: {CYAN}ACTIVE{RESET} ({kb_count} docs, persistent, {ml_status})")
+        if learn:
+            print(f"  Learn: {CYAN}ON{RESET} (successful sequences saved to KB)")
+    else:
+        print(f"  RAG: {YELLOW}UNAVAILABLE{RESET}")
     print(f"{'─'*70}{RESET}\n")
-    
+
     try:
         d = u2.connect(serial)
         d.screen_on()
@@ -420,78 +513,87 @@ def run(task: str, serial: str = SERIAL):
     except Exception as e:
         print(f"{RED}✗ Cannot connect: {e}{RESET}")
         return False
-    
+
     last_sig = None
     _action_history.clear()
     consecutive_no_change = 0
     loop_escape_count = 0
-    context_history = []  # For RAG retrieval
-    
+
     for step in range(1, MAX_STEPS + 1):
         print(f"\n{CYAN}[Step {step}/{MAX_STEPS}]{RESET}")
-        
+
         # Read screen with stability wait
         time.sleep(SCREEN_READ_WAIT)
         screen = read_screen(d)
         sig = screen_sig(screen)
         changed = sig != last_sig
         last_sig = sig
-        
+
         print(f"  Screen: {len(screen)} elements | changed: {changed}")
-        
+
         # Track changes for loop detection
         if not changed:
             consecutive_no_change += 1
         else:
             consecutive_no_change = 0
-        
-        # Get Claude decision (with MemShield-scanned context)
-        dec = ask_claude(task, screen, step, context_history)
-        
+
+        # Query RAG for contextual knowledge
+        rag_docs = query_rag(memshield, task, _action_history)
+
+        # Get Claude decision with RAG context
+        dec = ask_claude(task, screen, step, rag_docs)
+
         action = dec.get("action", "fail")
         params = dec.get("params", {})
         thought = dec.get("thought", "")
-        
+
         print(f"  Thought: {thought}")
         print(f"  Action:  {action} {params}")
-        
+
         # Check for terminal conditions
         if action == "done":
             print(f"\n{GREEN}✓ Task complete: {params.get('summary', '')}{RESET}\n")
+            if learn and memshield and _action_history:
+                _record_experience(memshield, task, _action_history, params.get("summary", ""))
             return True
-        
+
         if action == "fail":
             print(f"\n{RED}✗ Agent failed: {params.get('reason', '')}{RESET}\n")
             return False
-        
+
         # Loop detection - give more time before declaring stuck
         if consecutive_no_change >= 6:
             print(f"  {YELLOW}No screen change for {consecutive_no_change} steps - pressing back{RESET}")
             action = "press"
             params = {"key": "back"}
             loop_escape_count += 1
-        
+
         if loop_escape_count >= 4:
             print(f"  {RED}Too many loop escapes - giving up{RESET}")
             return False
-        
+
         # Execute with lag handling
         result = execute_action(d, action, params)
         print(f"  Result:  {result}")
-        
+
         # PRISM blocks trigger retry without history update
         if result == "blocked_by_prism":
             print(f"  {YELLOW}Action blocked by PRISM - retrying{RESET}")
             time.sleep(BASE_WAIT)
             continue
-        
+
         # Track action for history
         if action not in ("done", "fail"):
             _action_history.append((action, json.dumps(params)))
-        
+
         # Wait for screen to settle (critical for lag)
         time.sleep(BASE_WAIT)
-    
+
+    # Max steps — record partial experience
+    if learn and memshield and _action_history:
+        _record_experience(memshield, task, _action_history,
+                           "PARTIAL — max steps reached", source="partial_experience")
+
     print(f"\n{RED}✗ Max steps reached{RESET}\n")
     return False
 
@@ -503,9 +605,11 @@ if __name__ == "__main__":
     p.add_argument("--no-prism", action="store_true", help="Disable PRISM Shield")
     p.add_argument("--no-memshield", action="store_true", help="Disable MemShield RAG scanning")
     p.add_argument("--no-lag-mode", action="store_true", help="Disable emulator lag compensation")
-    
+    p.add_argument("--learn", action="store_true", help="Record successful sequences to RAG KB")
+    p.add_argument("--ingest", nargs="+", metavar="FILE", help="Ingest documents into RAG KB")
+
     a = p.parse_args()
-    
+
     if a.no_prism:
         globals()["ENABLE_PRISM"] = False
     if a.no_memshield:
@@ -513,10 +617,14 @@ if __name__ == "__main__":
     if a.no_lag_mode:
         globals()["BASE_WAIT"] = 1.5
         globals()["ACTION_SETTLE_TIME"] = 1.5
-    
+
+    if a.ingest:
+        ingest_files(a.ingest)
+        sys.exit(0)
+
     if not ANTHROPIC_API_KEY:
         print(f"{RED}Error: ANTHROPIC_API_KEY not set{RESET}")
         sys.exit(1)
-    
-    success = run(a.task, a.serial)
+
+    success = run(a.task, a.serial, learn=a.learn)
     sys.exit(0 if success else 1)

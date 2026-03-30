@@ -72,15 +72,10 @@ Use this to avoid repeating failed actions or re-typing text you already entered
 Reply with ONLY a single JSON object:
 {"thought":"...","action":"...","params":{}}
 
-Installed apps (use these exact package names):
-  Todo list:  todolist.scheduleplanner.dailyplanner.todo.reminders
-  Clock:      com.google.android.deskclock
-  Chrome:     com.android.chrome
-  Calendar:   com.google.android.calendar
-  Termux:     com.termux
+Use the "context" field for app package names and interaction patterns (provided by RAG).
 
 Actions:
-  open_app  {"package": "todolist.scheduleplanner.dailyplanner.todo.reminders"}
+  open_app  {"package": "com.example.app"}
   tap       {"text": "exact text"} or {"desc": "exact desc"} or {"class": "EditText"}
   type      {"text": "text to type"}  — clears field first, then types
   clear     {}                        — clears the focused text field
@@ -528,6 +523,7 @@ def _setup_rag(enable_prism: bool) -> "MemShield | None":
 
 def _record_experience(
     shield: "MemShield", task: str, history: "ActionHistory", summary: str,
+    source: str = "experience",
 ):
     """Record a successful action sequence as a RAG document for future tasks."""
     steps_desc = []
@@ -554,7 +550,7 @@ def _record_experience(
     doc_id = f"exp_{hashlib.sha256(doc.encode()).hexdigest()[:12]}"
 
     try:
-        stats = shield.ingest_with_scan(documents=[doc], ids=[doc_id], source="experience")
+        stats = shield.ingest_with_scan(documents=[doc], ids=[doc_id], source=source)
         if stats["accepted"] > 0:
             logger.info(f"Experience recorded: {doc[:80]}...")
             print(f"  {CYAN}Learned: {doc[:60]}...{RESET}")
@@ -623,6 +619,10 @@ def run(task: str, serial: str = SERIAL, llm: str = "groq",
         prism=prism,
         serial=serial,
         memshield=memshield,
+        watched_paths=[
+            "/sdcard/Download/.prism_test.txt",
+            "/sdcard/Documents/notes.txt",
+        ],
     )
 
     ask = {"groq": ask_groq, "claude": ask_claude, "local": ask_local}[llm]
@@ -692,6 +692,11 @@ def run(task: str, serial: str = SERIAL, llm: str = "groq",
             continue
 
         time.sleep(1.5)
+
+    # Record partial experience on timeout
+    if learn and memshield and action_history.entries:
+        _record_experience(memshield, task, action_history,
+                           "PARTIAL — max steps reached", source="partial_experience")
 
     print(f"\n{RED}Max steps reached{RESET}")
     return False
