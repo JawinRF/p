@@ -256,31 +256,50 @@ def execute_action(d, action: str, params: dict) -> str:
     Execute action with PRISM verification for sensitive ops.
     Returns: "ok", "blocked_by_prism", "not_found", "error", or action result.
     """
-    # Sensitive action detection
-    sensitive_keywords = {"send", "export", "share", "upload", "call", "email", "contact", "delete"}
-    
-    # PRISM check for tap
+    import re as _re
+
+    _ALLOWED_PACKAGES = {
+        "todolist.scheduleplanner.dailyplanner.todo.reminders",
+        "com.google.android.deskclock",
+        "com.android.chrome",
+        "com.google.android.calendar",
+        "com.termux",
+        "com.android.launcher3",
+        "com.android.settings",
+    }
+
+    _DANGEROUS_TYPE_PATTERNS = _re.compile(
+        r"(?i)("
+        r"https?://|adb\s+shell|su\s+-c|pm\s+grant|pm\s+install|"
+        r"am\s+start.*-d\s+|curl\s+|wget\s+|rm\s+-rf|chmod\s+[0-7]{3}"
+        r")"
+    )
+
+    # ALL taps go through PRISM
     if action == "tap":
         tap_text = params.get("text", "") + params.get("desc", "")
-        if any(kw in tap_text.lower() for kw in sensitive_keywords):
-            allowed, conf, reason = call_prism(tap_text, "ui", "sensitive_tap")
+        if tap_text.strip():
+            allowed, conf, reason = call_prism(tap_text, "ui", "tap_action")
             if not allowed:
                 logger.warning(f"PRISM BLOCKED tap: {tap_text}")
                 return "blocked_by_prism"
-    
-    # PRISM check for type
+
+    # Full text through PRISM + dangerous pattern check
     elif action == "type":
         text_data = params.get("text", "")
-        allowed, conf, reason = call_prism(text_data[:200], "input", "text_input")
-        if not allowed:
-            logger.warning(f"PRISM BLOCKED text input")
-            return "blocked_by_prism"
-    
-    # PRISM check for app launch
+        if text_data:
+            if _DANGEROUS_TYPE_PATTERNS.search(text_data):
+                logger.warning(f"BLOCKED typed text (dangerous pattern): {text_data[:60]}")
+                return "blocked_by_prism"
+            allowed, conf, reason = call_prism(text_data, "input", "text_input")
+            if not allowed:
+                logger.warning(f"PRISM BLOCKED text input")
+                return "blocked_by_prism"
+
+    # Whitelist: known-safe packages pass, everything else gets checked
     elif action == "open_app":
         pkg = params.get("package", "")
-        sensitive_apps = {"email", "sms", "telegram", "whatsapp", "contacts"}
-        if any(kw in pkg.lower() for kw in sensitive_apps):
+        if pkg and pkg not in _ALLOWED_PACKAGES:
             allowed, conf, reason = call_prism(f"open:{pkg}", "intent", "app_launch")
             if not allowed:
                 logger.warning(f"PRISM BLOCKED app: {pkg}")

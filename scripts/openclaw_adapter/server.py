@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import collections
 import concurrent.futures
 import json
 import logging
 import os
 import sys
+import time as _time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import asdict
 from functools import lru_cache
@@ -55,6 +57,24 @@ DEFAULT_PORT = int(os.getenv("PRISM_SIDECAR_PORT", "8765"))
 ENABLE_MEMSHIELD_RAG = os.getenv("PRISM_ENABLE_MEMSHIELD_RAG", "1").lower() not in {"0", "false", "no"}
 UI_EXTRACTOR = UIExtractor()
 _EXECUTOR = ThreadPoolExecutor(max_workers=2)
+
+# ── Rate Limiter ─────────────────────────────────────────────────────────────
+
+_RATE_LIMIT_MAX = int(os.getenv("PRISM_RATE_LIMIT", "100"))  # requests per second per session
+_rate_windows: dict[str, collections.deque] = {}
+
+
+def _check_rate_limit(session_id: str) -> bool:
+    """Return True if request is allowed, False if rate limited."""
+    now = _time.monotonic()
+    window = _rate_windows.setdefault(session_id, collections.deque())
+    # Purge entries older than 1 second
+    while window and window[0] < now - 1.0:
+        window.popleft()
+    if len(window) >= _RATE_LIMIT_MAX:
+        return False
+    window.append(now)
+    return True
 
 
 def _model_dump(model: object) -> dict:
@@ -112,6 +132,17 @@ def _inspect_rag_store(text: str) -> tuple[str, float, str, str]:
 
 
 def handle_inspect(request: InspectRequest) -> InspectResponse:
+    # Rate limit per session
+    sid = request.session_id or "anonymous"
+    if not _check_rate_limit(sid):
+        logger.warning(f"Rate limited session {sid}")
+        return InspectResponse(
+            verdict="BLOCK",
+            confidence=1.0,
+            reason="Rate limited — too many requests per second",
+            ingestion_path=request.ingestion_path or "unknown",
+        )
+
     ingestion_path = request.ingestion_path or map_ingestion_path(
         request.source_type,
         request.source_name,

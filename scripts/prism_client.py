@@ -3,7 +3,7 @@ prism_client.py — Thin HTTP client for the PRISM Shield sidecar.
 Single point of contact for all PRISM Shield interactions.
 """
 from __future__ import annotations
-import logging, os, uuid
+import hashlib, logging, os, uuid
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -53,7 +53,7 @@ class PrismClient:
         metadata: dict | None = None,
     ) -> InspectResult:
         """Send text through the PRISM pipeline. Returns InspectResult."""
-        cache_key = (text[:200], ingestion_path)
+        cache_key = (hashlib.sha256(text.encode()).hexdigest(), ingestion_path)
         if cache_key in self._cache:
             return self._cache[cache_key]
 

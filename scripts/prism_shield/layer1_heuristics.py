@@ -1,42 +1,22 @@
 # scripts/prism_shield/layer1_heuristics.py
 
-import re
+import sys
+import os
 from typing import Optional
 from .base import ValidationResult
 
+# Import from single source of truth
+_scripts_dir = os.path.dirname(os.path.dirname(__file__))
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
+from shared_patterns import INJECTION_PATTERNS, SUSPICIOUS_PATTERNS
+
+
 class HeuristicsEngine:
     def __init__(self):
-        # High confidence block patterns
-        self.block_patterns = [
-            # Standard injection keywords
-            r'(?i)\bignore (all )?previous (instructions|context|prompts)\b',
-            r'(?i)\bsystem override\b',
-            r'(?i)\byou must now act as\b',
-            r'(?i)\bnew task:\b',
-            
-            # Action keywords
-            r'(?i)\[AGENT( INSTRUCTION)?:.*?\]',
-            r'(?i)\[AUTO-AGENT.*?\]',
-            r'(?i)<system_override>',
-            r'(?i)<hidden_instruction>',
-            
-            # UIExtractor structural flags
-            r'\[HIDDEN_UI_ELEMENT\]',
-            r'\[CONTEXT_MISMATCH.*?\]',
-        ]
-        
-        # Medium confidence (quarantine/flag but maybe not immediate block unless combined)
-        self.suspicious_patterns = [
-            r'(?i)\bexport( all)? contacts\b',
-            r'(?i)\bforward( all)? sms\b',
-            r'(?i)\bsilently( approve| forward| delete)\b',
-            r'(?i)\bant_permission\b',
-            r'(?i)\badb shell pm grant\b',
-            r'(?i)chmod 777'
-        ]
-        
-        self._compiled_block = [re.compile(p) for p in self.block_patterns]
-        self._compiled_suspicious = [re.compile(p) for p in self.suspicious_patterns]
+        # Patterns are pre-compiled in shared_patterns.py
+        self._compiled_block = INJECTION_PATTERNS
+        self._compiled_suspicious = SUSPICIOUS_PATTERNS
 
     def evaluate(self, normalized_text: str) -> Optional[ValidationResult]:
         """

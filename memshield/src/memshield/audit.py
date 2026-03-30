@@ -22,11 +22,36 @@ class AuditRecord:
     metadata: dict[str, Any]
 
 class AuditLogger:
+    MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10MB per log file
+    KEEP_ROTATED = 5                    # keep last 5 rotated files
+
     def __init__(self, log_path: str | Path):
         self.log_path = Path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
 
+    def _rotate_if_needed(self) -> None:
+        """Rotate log file if it exceeds MAX_SIZE_BYTES."""
+        try:
+            if not self.log_path.exists() or self.log_path.stat().st_size < self.MAX_SIZE_BYTES:
+                return
+        except OSError:
+            return
+
+        # Shift existing rotated files: .4 → .5, .3 → .4, etc.
+        for i in range(self.KEEP_ROTATED, 0, -1):
+            src = self.log_path.with_suffix(f".{i}")
+            dst = self.log_path.with_suffix(f".{i + 1}")
+            if src.exists():
+                if i == self.KEEP_ROTATED:
+                    src.unlink()  # delete oldest
+                else:
+                    src.rename(dst)
+
+        # Current → .1
+        self.log_path.rename(self.log_path.with_suffix(".1"))
+
     def log(self, record: AuditRecord) -> None:
+        self._rotate_if_needed()
         with self.log_path.open("a") as f:
             f.write(json.dumps(asdict(record)) + "\n")
 

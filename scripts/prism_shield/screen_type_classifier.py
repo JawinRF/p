@@ -11,7 +11,11 @@ An attacker cannot spoof the AccessibilityService node class hierarchy
 or the foreground package name without a compromised OS.
 """
 
+import re
+
 from .screen_context import ScreenContext, ScreenType
+
+_PRICE_PATTERN = re.compile(r'[$€£₹¥]\s*\d+|\d+\.\d{2}')
 
 # Android WindowManager.LayoutParams type constants
 _TYPE_APPLICATION_OVERLAY = 2038   # SYSTEM_ALERT_WINDOW
@@ -93,9 +97,7 @@ def classify(ctx: ScreenContext) -> ScreenType:
 
     # E-commerce: RecyclerView present and visible text contains price patterns
     if has_recycler:
-        import re
-        price_pattern = re.compile(r'[$€£₹¥]\s*\d+|\d+\.\d{2}')
-        if any(price_pattern.search(n.text) for n in ctx.visible_nodes):
+        if any(_PRICE_PATTERN.search(n.text) for n in ctx.visible_nodes):
             return ScreenType.ECOMMERCE
 
     # System dialog: small node count + AlertDialog in activity name

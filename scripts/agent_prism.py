@@ -12,7 +12,7 @@ Usage:
     python scripts/agent_prism.py --task "Add todo: Buy groceries" --llm claude
     python scripts/agent_prism.py --task "Set alarm" --no-prism   # bypass (for A/B test)
 """
-import argparse, hashlib, json, logging, os, subprocess, sys, time
+import argparse, hashlib, json, logging, os, re, subprocess, sys, time
 import requests
 import uiautomator2 as u2
 
@@ -289,38 +289,63 @@ def _clear_focused_field(d, serial: str):
     time.sleep(0.1)
 
 
+# Allowed packages — anything not on this list gets PRISM-checked
+_ALLOWED_PACKAGES = {
+    "todolist.scheduleplanner.dailyplanner.todo.reminders",
+    "com.google.android.deskclock",
+    "com.android.chrome",
+    "com.google.android.calendar",
+    "com.termux",
+    "com.android.launcher3",
+    "com.android.settings",
+}
+
+# Dangerous patterns in outgoing typed text (compiled once at module load)
+_DANGEROUS_TYPE_PATTERNS = re.compile(
+    r"(?i)("
+    r"https?://|"                       # URLs
+    r"adb\s+shell|"                     # ADB commands
+    r"su\s+-c|"                         # root escalation
+    r"pm\s+grant|pm\s+install|"         # package manager abuse
+    r"am\s+start.*-d\s+|"              # activity manager deep links
+    r"curl\s+|wget\s+|"                # network fetch
+    r"rm\s+-rf|"                        # destructive ops
+    r"chmod\s+[0-7]{3}"                # permission changes
+    r")"
+)
+
+
 def execute(d, action: str, params: dict, serial: str,
             prism: PrismClient | None = None) -> str:
     """
     Execute an action on the emulator.
     Sensitive outgoing actions are still checked through PRISM.
     """
-    sensitive_keywords = {
-        "send", "export", "share", "upload", "transfer",
-        "contact", "email", "call",
-    }
-
     if prism:
+        # ALL taps go through PRISM — not just keyword matches
         if action == "tap":
             tap_text = params.get("text", "") + params.get("desc", "")
-            if any(kw in tap_text.lower() for kw in sensitive_keywords):
-                r = prism.inspect(tap_text, "ui_accessibility", "sensitive_tap")
+            if tap_text.strip():
+                r = prism.inspect(tap_text, "ui_accessibility", "tap_action")
                 if not r.allowed:
                     return "blocked_by_prism"
 
         elif action == "type":
             text_data = params.get("text", "")
-            r = prism.inspect(text_data[:200], "clipboard", "text_input")
-            if not r.allowed:
-                return "blocked_by_prism"
+            if text_data:
+                # Block dangerous shell/URL patterns outright
+                if _DANGEROUS_TYPE_PATTERNS.search(text_data):
+                    logger.warning(f"BLOCKED typed text (dangerous pattern): {text_data[:60]}")
+                    return "blocked_by_prism"
+                # Full text through PRISM (not truncated to 200 chars)
+                r = prism.inspect(text_data, "clipboard", "text_input")
+                if not r.allowed:
+                    return "blocked_by_prism"
 
         elif action == "open_app":
             pkg = params.get("package", "")
-            sensitive_apps = {
-                "email", "sms", "telegram", "whatsapp",
-                "messenger", "contacts",
-            }
-            if any(kw in pkg.lower() for kw in sensitive_apps):
+            # Whitelist: known-safe packages pass, everything else gets checked
+            if pkg and pkg not in _ALLOWED_PACKAGES:
                 r = prism.inspect(f"open:{pkg}", "android_intents", "app_launch")
                 if not r.allowed:
                     return "blocked_by_prism"

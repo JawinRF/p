@@ -6,6 +6,7 @@ Invoked only when Layer 2 returns ALLOW. Apache 2.0, no gating.
 
 from __future__ import annotations
 
+import os
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
 
@@ -16,13 +17,19 @@ class DeBERTaValidator:
     """ProtectAI DeBERTa prompt-injection classifier. BLOCK/QUARANTINE on INJECTION by confidence."""
 
     MODEL_ID = "ProtectAI/deberta-v3-base-prompt-injection-v2"
+    # Local pinned copy — avoids HuggingFace Hub dependency at runtime
+    LOCAL_MODEL_PATH = os.path.join(
+        os.path.dirname(__file__), "..", "..", "models", "deberta_prompt_injection_v2"
+    )
     BLOCK_THRESHOLD = 0.90  # INJECTION with confidence >= this -> BLOCK
     # INJECTION with confidence < BLOCK_THRESHOLD -> QUARANTINE
 
     def __init__(self) -> None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
-        model = AutoModelForSequenceClassification.from_pretrained(self.MODEL_ID)
+        # Prefer local pinned model; fall back to HuggingFace Hub
+        model_path = self.LOCAL_MODEL_PATH if os.path.isdir(self.LOCAL_MODEL_PATH) else self.MODEL_ID
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        model = AutoModelForSequenceClassification.from_pretrained(model_path)
         self._classifier = pipeline(
             "text-classification",
             model=model,
