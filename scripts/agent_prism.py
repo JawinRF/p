@@ -12,7 +12,7 @@ Usage:
     python scripts/agent_prism.py --task "Add todo: Buy groceries" --llm claude
     python scripts/agent_prism.py --task "Set alarm" --no-prism   # bypass (for A/B test)
 """
-import argparse, json, logging, os, subprocess, sys, time
+import argparse, hashlib, json, logging, os, subprocess, sys, time
 import requests
 import uiautomator2 as u2
 
@@ -470,48 +470,122 @@ class LoopDetector:
 
 # ── Main Agent Loop ───────────────────────────────────────────────────────────
 
+_SEED_DOCS = [
+    "The todo app package is todolist.scheduleplanner.dailyplanner.todo.reminders. Tap the + or floating action button to add a new task.",
+    "The clock app package is com.google.android.deskclock. To set an alarm, open the Alarm tab and tap the + button.",
+    "Chrome browser package is com.android.chrome. The URL bar is at the top of the screen.",
+    "The calendar app package is com.google.android.calendar. Tap the + button to add a new event.",
+    "To navigate between apps, press the home button or use the recent apps button. Swipe up on the home screen to open the app drawer.",
+    "When a dialog box appears asking 'Do you want to quit?', tap CANCEL to stay in the app or OK to exit.",
+    "Text fields (EditText) must be tapped to focus before typing. After typing, tap a Save or confirm button.",
+    "If an app doesn't open with open_app, try pressing home first, then swiping up to open the app drawer, then tapping the app icon.",
+]
+
+
 def _setup_rag(enable_prism: bool) -> "MemShield | None":
-    """Create an in-memory RAG knowledge base with Android task knowledge."""
+    """Create a persistent RAG knowledge base with MemShield defense."""
     if not _RAG_AVAILABLE:
         return None
     try:
-        client = chromadb.Client()
-        # Delete if exists from previous run
+        db_path = os.path.join(os.path.dirname(__file__), "..", "data", "chromadb")
+        client = chromadb.PersistentClient(path=db_path)
+        collection = client.get_or_create_collection("agent_kb")
+
+        # Try with ML layers on for full defense; fall back if torch missing
         try:
-            client.delete_collection("agent_kb")
-        except Exception:
-            pass
-        collection = client.create_collection("agent_kb")
+            shield = MemShield(
+                collection=collection,
+                config=ShieldConfig(
+                    enable_normalization=enable_prism,
+                    enable_ml_layers=enable_prism,
+                    enable_provenance=True,
+                ),
+            )
+        except ImportError:
+            logger.warning("ML layers unavailable — RAG using regex + provenance only")
+            shield = MemShield(
+                collection=collection,
+                config=ShieldConfig(
+                    enable_normalization=enable_prism,
+                    enable_ml_layers=False,
+                    enable_provenance=True,
+                ),
+            )
 
-        docs = [
-            "The todo app package is todolist.scheduleplanner.dailyplanner.todo.reminders. Tap the + or floating action button to add a new task.",
-            "The clock app package is com.google.android.deskclock. To set an alarm, open the Alarm tab and tap the + button.",
-            "Chrome browser package is com.android.chrome. The URL bar is at the top of the screen.",
-            "The calendar app package is com.google.android.calendar. Tap the + button to add a new event.",
-            "To navigate between apps, press the home button or use the recent apps button. Swipe up on the home screen to open the app drawer.",
-            "When a dialog box appears asking 'Do you want to quit?', tap CANCEL to stay in the app or OK to exit.",
-            "Text fields (EditText) must be tapped to focus before typing. After typing, tap a Save or confirm button.",
-            "If an app doesn't open with open_app, try pressing home first, then swiping up to open the app drawer, then tapping the app icon.",
-        ]
-        ids = [f"kb_{i}" for i in range(len(docs))]
+        # Seed only on first run (persistent DB survives restarts).
+        # Seeds are trusted internal content — use add_with_provenance directly
+        # (ingest_with_scan would false-positive on imperative instructions).
+        if collection.count() == 0:
+            ids = [f"kb_{i}" for i in range(len(_SEED_DOCS))]
+            shield.add_with_provenance(documents=_SEED_DOCS, ids=ids)
 
-        shield = MemShield(
-            collection=collection,
-            config=ShieldConfig(
-                enable_normalization=enable_prism,
-                enable_ml_layers=False,  # keep fast for agent loop
-                enable_provenance=True,
-            ),
-        )
-        shield.add_with_provenance(documents=docs, ids=ids)
-        logger.info(f"RAG knowledge base loaded: {len(docs)} documents")
+        logger.info(f"RAG knowledge base: {collection.count()} documents (persistent)")
         return shield
     except Exception as e:
         logger.warning(f"RAG setup failed: {e}")
         return None
 
 
-def run(task: str, serial: str = SERIAL, llm: str = "groq", enable_prism: bool = True):
+def _record_experience(
+    shield: "MemShield", task: str, history: "ActionHistory", summary: str,
+):
+    """Record a successful action sequence as a RAG document for future tasks."""
+    steps_desc = []
+    for entry in history.entries:
+        a, p, r = entry["action"], entry["params"], entry["result"]
+        if r != "ok":
+            continue
+        if a == "open_app":
+            steps_desc.append(f"Open {p.get('package', '?')}")
+        elif a == "tap":
+            target = p.get("text") or p.get("desc") or p.get("class", "?")
+            steps_desc.append(f"Tap '{target}'")
+        elif a == "type":
+            steps_desc.append(f"Type '{p.get('text', '')}'")
+        elif a == "press":
+            steps_desc.append(f"Press {p.get('key', '?')}")
+        elif a == "swipe":
+            steps_desc.append(f"Swipe {p.get('direction', '?')}")
+
+    if not steps_desc:
+        return
+
+    doc = f"To {task.lower()}: {'. '.join(steps_desc)}. Result: {summary}"
+    doc_id = f"exp_{hashlib.sha256(doc.encode()).hexdigest()[:12]}"
+
+    try:
+        stats = shield.ingest_with_scan(documents=[doc], ids=[doc_id], source="experience")
+        if stats["accepted"] > 0:
+            logger.info(f"Experience recorded: {doc[:80]}...")
+            print(f"  {CYAN}Learned: {doc[:60]}...{RESET}")
+    except Exception as e:
+        logger.warning(f"Experience recording failed: {e}")
+
+
+def ingest_files(file_paths: list[str], enable_prism: bool = True):
+    """Ingest documents into the persistent RAG knowledge base."""
+    from doc_chunker import load_and_chunk
+
+    shield = _setup_rag(enable_prism)
+    if not shield:
+        print("RAG not available (install chromadb + memshield)")
+        return
+
+    for path in file_paths:
+        print(f"  Ingesting: {path}")
+        chunks = load_and_chunk(path)
+        ids = [f"doc_{hashlib.sha256(path.encode()).hexdigest()[:8]}_{i}" for i in range(len(chunks))]
+        stats = shield.ingest_with_scan(documents=chunks, ids=ids, source=os.path.basename(path))
+        print(f"    {stats['accepted']} accepted, {stats['blocked']} blocked, "
+              f"{stats['quarantined']} quarantined")
+
+    # Report total KB size
+    count = shield.collection.count() if shield.collection else 0
+    print(f"\n  Knowledge base now has {count} documents total.")
+
+
+def run(task: str, serial: str = SERIAL, llm: str = "groq",
+        enable_prism: bool = True, learn: bool = False):
     print(f"\n{CYAN}{'='*60}{RESET}")
     print(f"  {BOLD}PRISM Agent — {'DEFENDED' if enable_prism else 'UNDEFENDED'}{RESET}")
     print(f"  Task: {task}")
@@ -536,7 +610,11 @@ def run(task: str, serial: str = SERIAL, llm: str = "groq", enable_prism: bool =
     # Set up RAG knowledge base
     memshield = _setup_rag(enable_prism)
     if memshield:
-        print(f"  RAG: {CYAN}ACTIVE{RESET} (MemShield-protected knowledge base)")
+        kb_count = memshield.collection.count() if memshield.collection else 0
+        ml_status = "6-layer" if memshield._tinybert else "regex+provenance"
+        print(f"  RAG: {CYAN}ACTIVE{RESET} ({kb_count} docs, persistent, {ml_status})")
+        if learn:
+            print(f"  Learn: {CYAN}ON{RESET} (successful sequences saved to KB)")
     else:
         print(f"  RAG: {YELLOW}UNAVAILABLE{RESET} (install chromadb + memshield)")
 
@@ -560,6 +638,7 @@ def run(task: str, serial: str = SERIAL, llm: str = "groq", enable_prism: bool =
         ctx = assembler.assemble(
             task=task, step=step, last_sig=last_sig,
             agent_typed_texts=action_history.typed_texts,
+            recent_actions=action_history.to_list(),
         )
         last_sig = assembler.get_screen_sig(ctx)
 
@@ -593,6 +672,8 @@ def run(task: str, serial: str = SERIAL, llm: str = "groq", enable_prism: bool =
 
         if action == "done":
             print(f"\n{GREEN}  {params.get('summary', '')}{RESET}")
+            if learn and memshield:
+                _record_experience(memshield, task, action_history, params.get("summary", ""))
             return True
         if action == "fail":
             print(f"\n{RED}  {params.get('reason', '')}{RESET}")
@@ -624,7 +705,13 @@ if __name__ == "__main__":
     p.add_argument("--serial", default=SERIAL, help="Emulator serial")
     p.add_argument("--llm", choices=["groq", "claude", "local"], default="groq", help="LLM backend")
     p.add_argument("--no-prism", action="store_true", help="Disable PRISM (for A/B testing)")
+    p.add_argument("--learn", action="store_true", help="Record successful sequences to RAG KB")
+    p.add_argument("--ingest", nargs="+", metavar="FILE", help="Ingest documents into RAG KB")
     a = p.parse_args()
 
-    success = run(a.task, a.serial, a.llm, enable_prism=not a.no_prism)
+    if a.ingest:
+        ingest_files(a.ingest, enable_prism=not a.no_prism)
+        sys.exit(0)
+
+    success = run(a.task, a.serial, a.llm, enable_prism=not a.no_prism, learn=a.learn)
     sys.exit(0 if success else 1)

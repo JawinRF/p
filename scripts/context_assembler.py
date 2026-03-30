@@ -95,6 +95,7 @@ class ContextAssembler:
         last_sig: str | None = None,
         rag_query: str | None = None,
         agent_typed_texts: set[str] | None = None,
+        recent_actions: list[dict] | None = None,
     ) -> AssembledContext:
         """
         Main entry point. Gathers all sources, filters through PRISM,
@@ -132,7 +133,7 @@ class ContextAssembler:
         ctx.blocked_counts["shared_storage"] = stor_blocked
 
         # 7. RAG Store
-        ctx.rag_context, rag_blocked = self._gather_rag(rag_query or task)
+        ctx.rag_context, rag_blocked = self._gather_rag(rag_query or task, recent_actions)
         ctx.blocked_counts["rag_store"] = rag_blocked
 
         return ctx
@@ -470,20 +471,31 @@ class ContextAssembler:
 
     # ── 7. RAG Store ─────────────────────────────────────────────────────────
 
-    def _gather_rag(self, query: str) -> tuple[list[str], int]:
-        """Query MemShield-wrapped ChromaDB, return clean chunks."""
+    def _gather_rag(
+        self, query: str, recent_actions: list[dict] | None = None,
+    ) -> tuple[list[str], int]:
+        """Query MemShield-wrapped ChromaDB with task + conversational context."""
         if self.memshield is None:
             return [], 0
 
+        # Enrich query with recent successful actions for better retrieval
+        enriched = query
+        if recent_actions:
+            action_context = " ".join(
+                f"{a['action']} {a.get('params', {}).get('text', '')}"
+                for a in recent_actions[-2:]
+                if a.get("result") == "ok"
+            ).strip()
+            if action_context:
+                enriched = f"{query} | recent: {action_context}"
+
         try:
             results = self.memshield.query(
-                query_texts=[query],
+                query_texts=[enriched],
                 n_results=5,
                 session_id=self.prism.session_id,
             )
             docs = results.get("documents", [[]])[0]
-            # MemShield already filtered blocked chunks, so whatever
-            # comes back is clean.
             return docs, 0
         except Exception as e:
             logger.warning(f"RAG query failed: {e}")

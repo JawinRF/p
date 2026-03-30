@@ -72,3 +72,7 @@ data/tinybert_training_dataset.parquet
 
 # Temp/generated files
 view.xml
+
+# ChromaDB runtime data
+data/chromadb/
+

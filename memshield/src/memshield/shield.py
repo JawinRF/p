@@ -308,6 +308,64 @@ class MemShield:
                 logger.warning(f"validate_reads BLOCKED: {sr.reason}")
         return allowed
 
+    def ingest_with_scan(
+        self,
+        documents: list[str],
+        ids: list[str],
+        metadatas: list[dict] | None = None,
+        source: str = "unknown",
+        session_id: str = "ingest",
+    ) -> dict:
+        """
+        Scan documents through all enabled layers BEFORE adding to ChromaDB.
+        Only clean documents are stored. Returns stats dict.
+        """
+        if self.collection is None:
+            raise ValueError("No ChromaDB collection configured")
+        if metadatas is None:
+            metadatas = [{} for _ in documents]
+
+        accepted_docs, accepted_ids, accepted_meta = [], [], []
+        stats: dict[str, Any] = {"accepted": 0, "blocked": 0, "quarantined": 0, "details": []}
+
+        for doc, doc_id, meta in zip(documents, ids, metadatas):
+            result = self.scan_chunk(doc, chunk_id=doc_id)
+
+            self.auditor.log_retrieval(
+                verdict=result.verdict,
+                confidence=result.confidence,
+                reason=result.reason,
+                chunk_id=doc_id,
+                chunk_text=doc,
+                collection=getattr(self.collection, "name", "unknown"),
+                session_id=session_id,
+                metadata={"event": "ingest_scan", "source": source},
+            )
+
+            if result.verdict == "ALLOW":
+                accepted_docs.append(doc)
+                accepted_ids.append(doc_id)
+                accepted_meta.append({**meta, "source": source})
+                stats["accepted"] += 1
+            elif result.verdict == "QUARANTINE":
+                self._quarantine_chunk(doc, doc_id, result)
+                stats["quarantined"] += 1
+            else:
+                stats["blocked"] += 1
+
+            stats["details"].append({
+                "id": doc_id, "verdict": result.verdict, "reason": result.reason,
+            })
+
+        if accepted_docs:
+            self.add_with_provenance(
+                documents=accepted_docs,
+                ids=accepted_ids,
+                metadatas=accepted_meta,
+            )
+
+        return stats
+
     def add_with_provenance(
         self,
         documents: list[str],
