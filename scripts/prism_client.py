@@ -137,7 +137,8 @@ class PrismClient:
         try:
             resp = requests.get(f"{self.url}/health", timeout=2)
             return resp.status_code == 200
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"PRISM sidecar health check failed: {exc}")
             return False
 
 

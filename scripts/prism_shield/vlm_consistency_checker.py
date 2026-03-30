@@ -98,7 +98,8 @@ class VLMConsistencyChecker:
                 # Older llama.cpp versions
                 from llama_cpp.llama_chat_format import Llava15ChatHandler
                 return Llava15ChatHandler(clip_model_path=VLM_MMPROJ_PATH, verbose=False)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"VLM chat handler init failed (VLM layer degraded): {e}")
             return None
 
     def check_async(

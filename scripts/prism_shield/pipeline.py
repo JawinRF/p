@@ -145,7 +145,11 @@ class PrismShield:
         if isinstance(screen_context, dict):
             try:
                 return ScreenContext.from_dict(screen_context)
-            except Exception:
+            except Exception as exc:
+                import logging
+                logging.getLogger("PrismShield.Pipeline").warning(
+                    f"ScreenContext parse failed (using NULL_CONTEXT): {exc}"
+                )
                 return NULL_CONTEXT
         return NULL_CONTEXT
 

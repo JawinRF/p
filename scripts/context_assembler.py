@@ -144,7 +144,8 @@ class ContextAssembler:
         try:
             raw_xml = self.device.dump_hierarchy()
             root = ET.fromstring(raw_xml)
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"UI hierarchy dump failed (fail-closed, returning empty): {exc}")
             return [], 0
 
         elements = self._parse_ui_tree(root)
@@ -274,7 +275,8 @@ class ContextAssembler:
                 ["adb", "-s", self.serial, "shell", "dumpsys", "notification", "--noredact"],
                 capture_output=True, text=True, timeout=5,
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"Notification dump failed (fail-closed, returning empty): {exc}")
             return [], 0
 
         notifications = self._parse_notifications(result.stdout)
@@ -351,7 +353,8 @@ class ContextAssembler:
                 capture_output=True, text=True, timeout=3,
             )
             clip_text = self._parse_service_call(result.stdout)
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"Clipboard read failed (fail-closed, returning empty): {exc}")
             return None, 0
 
         if not clip_text:
@@ -387,7 +390,8 @@ class ContextAssembler:
                  "logcat", "-d", "-s", "ActivityManager:I", "-t", "20"],
                 capture_output=True, text=True, timeout=3,
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"Intent gathering failed (fail-closed, returning empty): {exc}")
             return [], 0
 
         intents = []
@@ -442,7 +446,8 @@ class ContextAssembler:
                     capture_output=True, text=True, timeout=3,
                 )
                 content = result.stdout.strip()
-            except Exception:
+            except Exception as exc:
+                logger.warning(f"Storage file read failed for {path} (fail-closed, skipping): {exc}")
                 continue
 
             if not content:

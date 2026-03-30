@@ -86,6 +86,10 @@ class WindowContextReader:
                 import time
                 time.sleep(1.0)
             except Exception as e:
+                import logging
+                logging.getLogger("PrismShield.WindowCtx").warning(
+                    f"Socket listener error (retrying in 0.5s): {e}"
+                )
                 import time
                 time.sleep(0.5)
 
@@ -96,8 +100,11 @@ class WindowContextReader:
             enrich(ctx)   # fills in screen_type deterministically
             with self._lock:
                 self._latest = ctx
-        except Exception:
-            pass   # malformed message — keep previous context
+        except Exception as e:
+            import logging
+            logging.getLogger("PrismShield.WindowCtx").warning(
+                f"Malformed JSON from window service (keeping previous context): {e}"
+            )
 
 
 # Module-level singleton — one reader per process
