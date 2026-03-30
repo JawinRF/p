@@ -1,0 +1,114 @@
+"""
+window_context_reader.py
+------------------------
+Reads the current ScreenContext from the Android WindowManager bridge service.
+The Android service writes a JSON-serialized ScreenContext to a Unix domain
+socket at SOCKET_PATH once per accessibility event (i.e. every time the
+visible UI changes).
+
+The Python pipeline reads the LATEST cached context synchronously.
+This is a non-blocking read — if no context is available, NULL_CONTEXT is returned.
+
+In unit tests and CI (no Android service running), always returns NULL_CONTEXT.
+"""
+
+import json
+import socket
+import threading
+from .screen_context import ScreenContext, NULL_CONTEXT
+from .screen_type_classifier import enrich
+
+SOCKET_PATH     = "/data/local/tmp/prism_window_ctx.sock"
+READ_TIMEOUT_MS = 2.0   # Hard cap: must not stall the <2ms pipeline
+
+
+class WindowContextReader:
+    """
+    Maintains a background thread that listens on the Unix socket and
+    caches the most recent ScreenContext. The pipeline calls get_context()
+    which returns the cached value instantly — zero blocking in the hot path.
+    """
+
+    def __init__(self, socket_path: str = SOCKET_PATH):
+        self._socket_path = socket_path
+        self._lock         = threading.Lock()
+        self._latest       = NULL_CONTEXT
+        self._running      = False
+        self._thread: threading.Thread | None = None
+
+    def start(self):
+        """Start background listener thread."""
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._listen_loop,
+            daemon=True,
+            name="WindowContextReader"
+        )
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+
+    def get_context(self) -> ScreenContext:
+        """Non-blocking. Returns the most recently received ScreenContext."""
+        with self._lock:
+            return self._latest
+
+    def _listen_loop(self):
+        """
+        Background thread: connects to the Android service socket and
+        reads new ScreenContext JSON objects as they arrive.
+        Each message is a newline-terminated JSON object.
+        """
+        while self._running:
+            try:
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                sock.settimeout(READ_TIMEOUT_MS / 1000.0)
+                sock.connect(self._socket_path)
+                buf = ""
+                while self._running:
+                    try:
+                        chunk = sock.recv(4096).decode("utf-8", errors="replace")
+                        if not chunk:
+                            break
+                        buf += chunk
+                        while "\n" in buf:
+                            line, buf = buf.split("\n", 1)
+                            line = line.strip()
+                            if line:
+                                self._process_message(line)
+                    except socket.timeout:
+                        continue
+                sock.close()
+            except (ConnectionRefusedError, FileNotFoundError):
+                # Android service not running (CI, unit test, or service crashed)
+                # Stay in loop, retry every second
+                import time
+                time.sleep(1.0)
+            except Exception as e:
+                import time
+                time.sleep(0.5)
+
+    def _process_message(self, json_str: str):
+        try:
+            d = json.loads(json_str)
+            ctx = ScreenContext.from_dict(d)
+            enrich(ctx)   # fills in screen_type deterministically
+            with self._lock:
+                self._latest = ctx
+        except Exception:
+            pass   # malformed message — keep previous context
+
+
+# Module-level singleton — one reader per process
+_reader = WindowContextReader()
+
+
+def start_reader():
+    """Call once at service startup."""
+    _reader.start()
+
+
+def get_current_context() -> ScreenContext:
+    """Call from A-MemGuard at inference time. Always returns instantly."""
+    return _reader.get_context()

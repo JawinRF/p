@@ -1,0 +1,41 @@
+{
+  "id": "openclaw-prism",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "sidecarUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:8765"
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "default": 500,
+        "minimum": 1
+      },
+      "failClosed": {
+        "type": "boolean",
+        "default": true
+      },
+      "secret": {
+        "type": "string"
+      },
+      "quarantineMode": {
+        "type": "string",
+        "enum": ["exclude", "placeholder"],
+        "default": "exclude"
+      },
+      "protectSources": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "messages": { "type": "boolean", "default": true },
+          "toolResults": { "type": "boolean", "default": true },
+          "memory": { "type": "boolean", "default": true },
+          "androidUi": { "type": "boolean", "default": true }
+        }
+      }
+    }
+  }
+}
+

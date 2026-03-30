@@ -1,0 +1,25 @@
+{
+  "name": "@openclaw/openclaw-prism",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenClaw PRISM Shield integration scaffold",
+  "main": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "openclaw": "2026.3.14"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.3"
+  },
+  "openclaw": {
+    "extensions": ["./src/index.ts"],
+    "install": {
+      "localPath": "extensions/openclaw-prism",
+      "defaultChoice": "local"
+    }
+  }
+}

@@ -1,0 +1,74 @@
+# Python & Virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+site-packages/
+
+# Virtual environments
+.venv
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+*.log
+*.tmp
+data/quarantine_store.jsonl
+data/audit_log.jsonl
+data/memshield_audit.jsonl
+data/memshield_quarantine.jsonl
+
+# Runtime-generated artifacts
+*.db
+*.db-shm
+*.db-wal
+*.key
+
+# Android build artifacts
+.gradle/
+local.properties
+*.apk
+*.aab
+captures/
+*.hprof
+
+# Secrets
+anthropic/
+
+# Large model files (download separately)
+models/
+
+# Training data with synthetic tokens (triggers GitHub push protection)
+data/tinybert_training_dataset.parquet
+
+# Temp/generated files
+view.xml
